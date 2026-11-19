@@ -1,0 +1,19 @@
+{
+  "recordName": "task.6f1c1d2e-8a3b-4c5d-9e0f-112233445566.2",
+  "recordType": "JuiceTask",
+  "recordChangeTag": "mf4b2s1k",
+  "fields": {
+    "title": { "value": "Water plants @9am. Kitchen first", "type": "STRING" },
+    "notes": { "value": "", "type": "STRING" },
+    "dueDate": { "value": "2026-11-21", "type": "STRING" },
+    "recurrence": { "value": "weekly", "type": "STRING" },
+    "recurrenceDay": { "value": 0, "type": "INT64" },
+    "seriesID": { "value": "6f1c1d2e-8a3b-4c5d-9e0f-112233445566", "type": "STRING" },
+    "occurrence": { "value": 2, "type": "INT64" },
+    "createdAt": { "value": "2026-11-14T15:30:00.000Z", "type": "STRING" },
+    "completedAt": { "value": "", "type": "STRING" },
+    "deletedAt": { "value": "", "type": "STRING" },
+    "schemaVersion": { "value": 1, "type": "INT64" }
+  },
+  "zoneID": { "zoneName": "JuiceSync" }
+}
