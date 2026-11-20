@@ -179,6 +179,21 @@ struct TaskLibrary: Codable, Equatable, Sendable {
         write(task, [.removed])
     }
 
+    // Undo for `delete`.
+    mutating func restore(_ id: String) {
+        guard var task = task(id), task.isDeleted else { return }
+        task.deletedAt = nil
+        write(task, [.removed])
+    }
+
+    // Every overdue open task moves to today, keeping its repeat.
+    mutating func moveOverdue(to today: CalendarDay) {
+        for task in openTasks {
+            guard let due = task.dueDate, due < today else { continue }
+            reschedule(task.id, to: today)
+        }
+    }
+
     // Offers tasks from outside sync (this device before sync was on). Only tasks the
     // library has no record of are added, and a remote copy found later wins.
     @discardableResult

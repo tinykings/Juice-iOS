@@ -271,5 +271,12 @@ struct TaskDraft: Equatable, Sendable {
         self.dueDate = due ?? (undatedIfNoDate ? nil : today)
     }
 
+    // Text taken as it is, for the add form, which has already applied any date word.
+    init(exactTitle: String, notes: String = "", dueDate: CalendarDay?) {
+        title = String(exactTitle.trimmingCharacters(in: .whitespacesAndNewlines).prefix(SyncCodec.maxTitle))
+        self.notes = String(notes.trimmingCharacters(in: .whitespacesAndNewlines).prefix(SyncCodec.maxNotes))
+        self.dueDate = dueDate
+    }
+
     var isEmpty: Bool { title.isEmpty }
 }

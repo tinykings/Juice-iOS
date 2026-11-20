@@ -3,7 +3,7 @@ import Foundation
 // A calendar date with no time or time zone: a task's due date, `YYYY-MM-DD` in sync.
 // Arithmetic runs in a fixed Gregorian UTC calendar so it never shifts with daylight
 // saving; only `today` and `start(in:)` look at the device's time zone.
-struct CalendarDay: Hashable, Comparable, Codable, Sendable, CustomStringConvertible {
+struct CalendarDay: Hashable, Comparable, Codable, Sendable, Identifiable, CustomStringConvertible {
     let year: Int
     let month: Int
     let day: Int
@@ -45,6 +45,8 @@ struct CalendarDay: Hashable, Comparable, Codable, Sendable, CustomStringConvert
         var container = encoder.singleValueContainer()
         try container.encode(description)
     }
+
+    var id: String { description }
 
     var description: String {
         String(format: "%04d-%02d-%02d", year, month, day)

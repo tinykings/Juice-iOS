@@ -13,7 +13,7 @@ enum ListItem: Identifiable, Equatable, Sendable {
     }
 }
 
-struct TaskGroup: Identifiable, Equatable, Sendable {
+struct TaskSection: Identifiable, Equatable, Sendable {
     enum Kind: Equatable, Sendable {
         case overdue
         case day(CalendarDay)
@@ -48,7 +48,7 @@ enum TaskGroups {
         return formatter
     }
     private static let formatters: [String: DateFormatter] = Dictionary(
-        uniqueKeysWithValues: ["EEE, MMM d", "MMM d", "EEEE", "MMMM yyyy", "MMM d, yyyy"].map { ($0, formatter($0)) })
+        uniqueKeysWithValues: ["EEE, MMM d", "MMM d", "EEEE", "MMMM yyyy", "MMM d, yyyy", "EEEE, MMMM d", "MMMM d, yyyy"].map { ($0, formatter($0)) })
 
     static func format(_ day: CalendarDay, _ pattern: String) -> String {
         var utc = Calendar(identifier: .gregorian)
@@ -72,15 +72,15 @@ enum TaskGroups {
             + events.sorted { ($0.start, $0.title) < ($1.start, $1.title) }.map(ListItem.event)
     }
 
-    static func build(open: [JuiceTask], events: [CalendarEvent] = [], today: CalendarDay) -> [TaskGroup] {
-        var groups: [TaskGroup] = []
+    static func build(open: [JuiceTask], events: [CalendarEvent] = [], today: CalendarDay) -> [TaskSection] {
+        var groups: [TaskSection] = []
         let dated = open.filter { $0.dueDate != nil }
         let undated = open.filter { $0.dueDate == nil }
         let overdue = dated.filter { $0.dueDate! < today }
         if !overdue.isEmpty || !undated.isEmpty {
             // Oldest first; undated tasks follow the ones that were due.
             let items = overdue.sorted(by: byDateAndTime) + undated.sorted { TaskTime.compare($0.title, $1.title) }
-            groups.append(TaskGroup(kind: .overdue, label: "Overdue", detail: nil, items: items.map(ListItem.task)))
+            groups.append(TaskSection(kind: .overdue, label: "Overdue", detail: nil, items: items.map(ListItem.task)))
         }
 
         let tasksByDay = Dictionary(grouping: dated, by: { $0.dueDate! })
@@ -92,7 +92,7 @@ enum TaskGroups {
             case 1: "Tomorrow"
             default: format(day, "EEEE")
             }
-            groups.append(TaskGroup(kind: .day(day), label: label,
+            groups.append(TaskSection(kind: .day(day), label: label,
                                     detail: format(day, offset <= 1 ? "EEE, MMM d" : "MMM d"),
                                     items: dayItems(tasksByDay[day] ?? [], eventsByDay[day] ?? [])))
         }
@@ -100,14 +100,14 @@ enum TaskGroups {
         let weekEnd = today.adding(days: 7)
         let later = Dictionary(grouping: dated.filter { $0.dueDate! > weekEnd }, by: { $0.dueDate!.firstOfMonth })
         for month in later.keys.sorted() {
-            groups.append(TaskGroup(kind: .month(month), label: format(month, "MMMM yyyy"), detail: nil,
+            groups.append(TaskSection(kind: .month(month), label: format(month, "MMMM yyyy"), detail: nil,
                                     items: later[month]!.sorted(by: byDateAndTime).map(ListItem.task)))
         }
         return groups
     }
 
     // The date on a task card, for groups whose header doesn't already say which day.
-    static func dateLabel(_ task: JuiceTask, in group: TaskGroup, today: CalendarDay) -> String? {
+    static func dateLabel(_ task: JuiceTask, in group: TaskSection, today: CalendarDay) -> String? {
         switch group.kind {
         case .overdue:
             guard let due = task.dueDate else { return "No date" }
@@ -116,6 +116,19 @@ enum TaskGroups {
             return task.dueDate.map { format($0, "EEE, MMM d") }
         case .day:
             return nil
+        }
+    }
+
+    // How Siri says when a task is due: "today", "tomorrow", "on Friday", "on Mon, Dec 7",
+    // or "with no date".
+    static func spokenDay(_ day: CalendarDay?, today: CalendarDay) -> String {
+        guard let day else { return "with no date" }
+        switch today.days(until: day) {
+        case 0: return "today"
+        case 1: return "tomorrow"
+        case -1: return "yesterday"
+        case 2...6: return "on " + format(day, "EEEE")
+        default: return "on " + format(day, day.year == today.year ? "EEEE, MMMM d" : "MMMM d, yyyy")
         }
     }
 }

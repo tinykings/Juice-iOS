@@ -31,4 +31,13 @@ final class TaskGroupsTests: XCTestCase {
     func testNoOverdueGroupWhenNothingIsLate() {
         XCTAssertEqual(TaskGroups.build(open: [], today: today).first?.label, "Today")
     }
+
+    func testSpokenDay() {
+        XCTAssertEqual(TaskGroups.spokenDay(today, today: today), "today")
+        XCTAssertEqual(TaskGroups.spokenDay(day("2026-11-20"), today: today), "tomorrow")
+        XCTAssertEqual(TaskGroups.spokenDay(day("2026-11-24"), today: today), "on Tuesday")
+        XCTAssertEqual(TaskGroups.spokenDay(day("2026-12-07"), today: today), "on Monday, December 7")
+        XCTAssertEqual(TaskGroups.spokenDay(day("2027-01-04"), today: today), "on January 4, 2027")
+        XCTAssertEqual(TaskGroups.spokenDay(nil, today: today), "with no date")
+    }
 }

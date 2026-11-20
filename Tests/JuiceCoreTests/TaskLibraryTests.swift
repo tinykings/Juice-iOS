@@ -135,6 +135,20 @@ final class TaskLibraryTests: XCTestCase {
         XCTAssertNil(library.systemFields["task.keep"])
     }
 
+    func testRestoreAndMoveOverdue() {
+        var library = TaskLibrary()
+        var late = add(&library, "Late", id: "late")
+        late.dueDate = day("2026-11-01")
+        library.entries[late.recordName] = late
+        _ = add(&library, "Later", id: "later")
+        library.delete("later", now: now)
+        XCTAssertEqual(library.openTasks.map(\.id), ["late"])
+        library.restore("later")
+        library.moveOverdue(to: today)
+        XCTAssertEqual(Set(library.openTasks.map(\.id)), ["late", "later"])
+        XCTAssertTrue(library.openTasks.allSatisfy { $0.dueDate == today })
+    }
+
     func testRoundTripsThroughJSON() throws {
         var library = TaskLibrary()
         _ = add(&library, "Gym @6am", recurrence: .weekly, id: "gym")
