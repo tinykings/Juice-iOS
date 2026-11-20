@@ -5,6 +5,7 @@ import { format, addDays, startOfDay, endOfDay, isAfter, isBefore, isSameDay } f
 import { useTasks } from '@/context/TaskContext';
 import { useSettings } from '@/context/SettingsContext';
 import { useCalendarFeed } from '@/context/CalendarFeedContext';
+import { useLocalStorage } from '@/hooks/useLocalStorage';
 import { useServiceWorker } from '@/hooks/useServiceWorker';
 import { useAppBadge } from '@/hooks/useAppBadge';
 import { useViewport } from '@/hooks/useViewport';
@@ -52,6 +53,7 @@ export default function HomePage() {
   const [confirmCompleteTask, setConfirmCompleteTask] = useState<Task | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [isSearchExpanded, setIsSearchExpanded] = useState(false);
+  const [isFutureExpanded, setIsFutureExpanded] = useLocalStorage<boolean>('juice-future-expanded', false);
   const [currentDate, setCurrentDate] = useState(new Date());
   const [isCaptureUrl, setIsCaptureUrl] = useState<boolean | null>(null);
   const [undoTask, setUndoTask] = useState<Task | null>(null);
@@ -182,7 +184,7 @@ export default function HomePage() {
     const lastEventDay = endOfDay(addDays(today, 7));
     const filtered = displayTasks.filter(t => {
       if (t.completed) return false;
-      if (!t.dueDate) return false; // Undated tasks are added to Overdue separately.
+      if (!t.dueDate) return false; // Undated tasks go in Future separately.
       if (t.isCalendarEvent) {
         // The list shows upcoming events for this week; the calendar shows the rest.
         const eventDay = parseTaskDate(t.dueDate);
@@ -205,7 +207,7 @@ export default function HomePage() {
   const hasNoTasks = tasks.length === 0;
 
   // Tasks without a date (e.g. older pinned tasks, or ones made in the iOS app)
-  // wait under Overdue until they're given a date or done.
+  // wait under Future until they're given a date or done.
   const undatedTasks = useMemo(() => {
     if (selectedDateFilter) return [];
     return tasks.filter(t => !t.dueDate && !t.completed && (!trimmedQuery || matchesSearch(t, trimmedQuery)));
@@ -515,6 +517,8 @@ export default function HomePage() {
             {visibleGroups.map((group) => {
               const groupHasCompletedTasks = group.isToday && completedTasks.length > 0;
               const groupHasTasks = group.tasks.length > 0 || groupHasCompletedTasks;
+              // Searching shows the matches in Future rather than hiding them.
+              const isCollapsed = Boolean(group.isFuture && !isFutureExpanded && !trimmedQuery);
 
               return (
                 <section key={group.label} style={{ marginBottom: 24 }}>
@@ -522,6 +526,12 @@ export default function HomePage() {
                     label={group.label}
                     detail={group.detail}
                     tone={group.isOverdue ? 'overdue' : group.isToday ? 'today' : 'default'}
+                    collapse={group.isFuture ? {
+                      expanded: !isCollapsed,
+                      count: group.tasks.length,
+                      controls: 'future-tasks',
+                      onToggle: () => setIsFutureExpanded(expanded => !expanded),
+                    } : undefined}
                     onAdd={group.date && !group.isOverdue
                       ? () => openInlineTaskForm(group.isToday ? null : formatTaskDate(group.date!))
                       : undefined}
@@ -535,7 +545,7 @@ export default function HomePage() {
                       },
                     } : undefined}
                   />
-                  <div style={{
+                  {!isCollapsed && <div id={group.isFuture ? 'future-tasks' : undefined} style={{
                     display: 'flex',
                     flexDirection: 'column',
                     gap: 8,
@@ -569,19 +579,19 @@ export default function HomePage() {
                         <TaskItem
                           key={task.id}
                           task={task}
-                          onComplete={() => handleTaskComplete(task.id, !!(group.isToday || group.isOverdue))}
+                          onComplete={() => handleTaskComplete(task.id, !!(group.isToday || group.isOverdue || group.isFuture))}
                           onEdit={() => openInlineTaskForm(null, task)}
                           showDate={true}
                           dateLabel={getTaskDateLabel(task, group, currentDate)}
                           isOverdue={group.isOverdue || false}
-                          needsConfirmation={!(group.isToday || group.isOverdue)}
+                          needsConfirmation={!(group.isToday || group.isOverdue || group.isFuture)}
                         />
                       )
                     ))}
                     {group.isToday && completedTasks.length > 0 && (
                       <CompletedTasksSection tasks={completedTasks} onUncomplete={uncompleteTask} />
                     )}
-                  </div>
+                  </div>}
                 </section>
               );
             })}

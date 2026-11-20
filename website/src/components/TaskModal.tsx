@@ -154,7 +154,7 @@ export function TaskForm({ editTask, onClose, onSave, onDateChange, dismissRef, 
     }
 
     // Tasks always get a date; an undated one (e.g. made in the iOS app) keeps
-    // no date until one is picked, and shows under Overdue meanwhile.
+    // no date until one is picked, and shows under Future meanwhile.
     const normalizedDueDate = effectiveDueDate ? normalizeTaskDate(effectiveDueDate) : '';
     const taskData = {
       title,

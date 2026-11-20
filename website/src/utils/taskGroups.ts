@@ -10,6 +10,8 @@ export interface TaskGroup {
   tasks: Task[];
   isToday?: boolean;
   isOverdue?: boolean;
+  /** Open undated tasks; collapsed by default in the list. */
+  isFuture?: boolean;
   date?: Date;
 }
 
@@ -28,6 +30,7 @@ export function withEventsLast(items: Task[], compareTasks: (a: Task, b: Task) =
 
 /** The date on a task card, for groups whose header doesn't already say which day it is. */
 export function getTaskDateLabel(task: Task, group: TaskGroup, now: Date): string | undefined {
+  if (group.isFuture) return undefined;
   if (group.isOverdue) {
     if (!task.dueDate) return 'No date';
     const date = parseTaskDate(task.dueDate);
@@ -36,21 +39,17 @@ export function getTaskDateLabel(task: Task, group: TaskGroup, now: Date): strin
   return group.date ? undefined : format(parseTaskDate(task.dueDate), 'EEE, MMM d');
 }
 
-/** Overdue, today, each of the next seven days, then one group per later month. */
+/** Overdue, today, future (undated), each of the next seven days, then one group per later month. */
 export function buildTaskGroups(incompleteTasks: Task[], undatedTasks: Task[], now: Date): TaskGroup[] {
   const today = startOfDay(now);
   const weekEnd = endOfDay(addDays(today, 7));
   const groups: TaskGroup[] = [];
 
   const overdueTasks = incompleteTasks.filter(t => isBefore(startOfDay(parseTaskDate(t.dueDate)), today));
-  if (overdueTasks.length > 0 || undatedTasks.length > 0) {
-    // Oldest first; undated tasks follow the ones that were due.
+  if (overdueTasks.length > 0) {
     groups.push({
       label: 'Overdue',
-      tasks: [
-        ...[...overdueTasks].sort(compareTasksByDateAndTime),
-        ...[...undatedTasks].sort(compareTasksByTime),
-      ],
+      tasks: [...overdueTasks].sort(compareTasksByDateAndTime),
       isOverdue: true,
       date: addDays(today, -1),
     });
@@ -62,6 +61,12 @@ export function buildTaskGroups(incompleteTasks: Task[], undatedTasks: Task[], n
     tasks: withEventsLast(incompleteTasks.filter(t => isSameDay(parseTaskDate(t.dueDate), today)), compareTasksByTime),
     isToday: true,
     date: today,
+  });
+
+  groups.push({
+    label: 'Future',
+    tasks: [...undatedTasks].sort(compareTasksByTime),
+    isFuture: true,
   });
 
   for (let i = 1; i <= 7; i++) {

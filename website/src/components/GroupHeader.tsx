@@ -6,6 +6,7 @@ export default function GroupHeader({
   tone,
   onAdd,
   action,
+  collapse,
 }: {
   label: string;
   detail?: string;
@@ -13,6 +14,8 @@ export default function GroupHeader({
   /** Tapping the header opens the add form for that day. */
   onAdd?: () => void;
   action?: { label: string; onClick: () => void };
+  /** Makes the header a disclosure button that shows or hides the group's tasks. */
+  collapse?: { expanded: boolean; count: number; controls: string; onToggle: () => void };
 }) {
   const text = (
     <>
@@ -36,7 +39,31 @@ export default function GroupHeader({
       letterSpacing: '0.01em',
       color: tone === 'overdue' ? 'var(--red)' : tone === 'today' ? 'var(--foreground)' : 'var(--muted)',
     }}>
-      {onAdd ? (
+      {collapse ? (
+        <button
+          type="button"
+          className="group-header-add"
+          onClick={collapse.onToggle}
+          aria-expanded={collapse.expanded}
+          aria-controls={collapse.controls}
+          style={{ width: '100%', alignItems: 'center' }}
+        >
+          <svg
+            width="14"
+            height="14"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.5"
+            viewBox="0 0 24 24"
+            aria-hidden="true"
+            style={{ transform: collapse.expanded ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.15s ease' }}
+          >
+            <path d="M9 18l6-6-6-6" />
+          </svg>
+          {text}
+          <span style={{ marginLeft: 'auto', fontSize: 12, fontWeight: 600 }}>{collapse.count}</span>
+        </button>
+      ) : onAdd ? (
         <button
           type="button"
           className="group-header-add"
