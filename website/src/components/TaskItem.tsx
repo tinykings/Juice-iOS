@@ -1,0 +1,428 @@
+'use client';
+
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { format, isBefore, isToday, startOfDay, startOfWeek, addDays } from 'date-fns';
+import { Task } from '@/types/task';
+import { useTasks } from '@/context/TaskContext';
+import { getTaskDisplayTitle, getTaskTitleParts } from '@/utils/taskTitle';
+import { formatTaskDate, parseTaskDate } from '@/utils/taskDate';
+import { formatTaskTime } from '@/utils/taskTime';
+
+interface TaskItemProps {
+  task: Task;
+  onComplete: () => void;
+  onEdit: () => void;
+  showDate?: boolean;
+  /** Shown in the meta row where the group header doesn't already give the date. */
+  dateLabel?: string;
+  isOverdue?: boolean;
+  needsConfirmation?: boolean;
+}
+
+export default function TaskItem({ 
+  task, 
+  onComplete, 
+  onEdit,
+  showDate,
+  dateLabel,
+  isOverdue: isOverdueProp,
+  needsConfirmation = false
+}: TaskItemProps) {
+  const { updateTask, deleteTask, keepConflictCopy } = useTasks();
+  const [isCompleting, setIsCompleting] = useState(false);
+  const [showReschedule, setShowReschedule] = useState(false);
+  const [anchorEl, setAnchorEl] = useState<HTMLElement | null>(null);
+  
+  const isRecurrencePreview = Boolean(task.isRecurrencePreview);
+  const taskDate = task.dueDate ? parseTaskDate(task.dueDate) : null;
+  const isOverdue = isOverdueProp || (taskDate ? isBefore(taskDate, startOfDay(new Date())) && !isToday(taskDate) : false);
+
+  const taskTime = formatTaskTime(task.title);
+  const titleParts = getTaskTitleParts(task);
+
+  const handleComplete = () => {
+    if (isCompleting) return;
+
+    if (needsConfirmation) {
+      onComplete();
+    } else {
+      setIsCompleting(true);
+      setTimeout(onComplete, 250);
+    }
+  };
+
+  const handleReschedule = (date: Date) => {
+    updateTask(task.id, { dueDate: formatTaskDate(date) });
+    setShowReschedule(false);
+  };
+
+  return (
+    <div style={{ position: 'relative' }}>
+      <div 
+        className="task-card"
+        data-task-card="true"
+        data-recurrence-preview={isRecurrencePreview ? 'true' : undefined}
+        title={isRecurrencePreview ? 'Future occurrence — available after current task is completed' : undefined}
+        onClick={isRecurrencePreview ? undefined : onEdit}
+        style={{
+          position: 'relative',
+          display: 'grid',
+          gridTemplateColumns: '38px minmax(0, 1fr)',
+          alignItems: 'flex-start',
+          justifyContent: 'flex-start',
+          columnGap: 12,
+          padding: '11px 12px 11px 10px',
+          border: `1px ${isRecurrencePreview ? 'dashed' : 'solid'} var(--border)`,
+          borderRadius: 'var(--radius-md)',
+          opacity: isCompleting ? 0.3 : (isRecurrencePreview ? 0.58 : 1),
+          transform: isCompleting ? 'translateX(-6px)' : 'translateX(0)',
+          transition: 'opacity 0.18s ease, background 0.15s ease, border-color 0.15s ease, transform 0.18s ease, box-shadow 0.15s ease',
+          cursor: isRecurrencePreview ? 'default' : 'pointer',
+        }}
+      >
+        {/* Keyboard route to the editor: Enter clicks through to the card's own handler. */}
+        {!isRecurrencePreview && (
+          <button type="button" className="task-card-open" aria-label={`Edit ${getTaskDisplayTitle(task)}`} />
+        )}
+        <button
+            data-task-checkbox="true"
+            data-overdue={isOverdue ? 'true' : undefined}
+            className="task-checkbox"
+            disabled={isCompleting || isRecurrencePreview}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (!isRecurrencePreview) handleComplete();
+            }}
+            style={{
+              flexShrink: 0,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              cursor: isCompleting || isRecurrencePreview ? 'default' : 'pointer',
+              background: 'none',
+              border: 'none',
+              padding: 4,
+              marginTop: 0,
+              transition: 'all 0.2s ease',
+            }}
+            aria-label={isRecurrencePreview ? 'Future occurrence preview' : 'Complete task'}
+          >
+            <div className="task-checkbox-circle" style={{
+              width: 24,
+              height: 24,
+              marginTop: 1,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              background: isCompleting
+                ? (isOverdue ? 'var(--red)' : 'var(--accent)')
+                : 'transparent',
+              border: `1.5px ${isRecurrencePreview ? 'dashed' : 'solid'} ${
+                isCompleting
+                  ? (isOverdue ? 'var(--red)' : 'var(--accent)')
+                  : isOverdue ? 'var(--red)' : 'var(--checkbox-border)'
+              }`,
+              borderRadius: '50%',
+              transition: 'background 0.15s, border-color 0.15s, box-shadow 0.15s',
+            }}>
+              {isCompleting && (
+                <svg width="13" height="13" fill="none" stroke="var(--background)" strokeWidth="3" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M5 12l5 5L20 7" strokeDasharray="20" style={{ animation: 'checkmark 0.25s ease-out forwards' }} />
+                </svg>
+              )}
+            </div>
+          </button>
+
+        {/* Content */}
+        <div style={{ minWidth: 0, paddingTop: 1 }}>
+          {/* Floats so only the title's first line makes room for it, even while it's hidden. */}
+            {showDate && !isRecurrencePreview && (
+              <div style={{ position: 'relative', float: 'right', marginLeft: 12, marginBottom: -6 }}>
+                <button
+                  className="reschedule-btn"
+                  data-overdue={isOverdue ? 'true' : undefined}
+                  aria-haspopup="menu"
+                  aria-expanded={showReschedule}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setAnchorEl(e.currentTarget);
+                    setShowReschedule(!showReschedule);
+                  }}
+                  style={{
+                    borderRadius: 'var(--radius-sm)',
+                    width: 28,
+                    height: 28,
+                    padding: 0,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: 5,
+                    fontSize: 'var(--text-meta)',
+                    fontWeight: 500,
+                    whiteSpace: 'nowrap',
+                  }}
+                  aria-label={taskDate ? `Reschedule ${isToday(taskDate) ? 'Today' : format(taskDate, 'MMM d')}` : 'Pick a date'}
+                  title="Reschedule"
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.25" aria-hidden="true">
+                    <path d="M6 9l6 6 6-6"/>
+                  </svg>
+                </button>
+
+                {showReschedule && anchorEl && (
+                  <RescheduleMenu
+                    anchorEl={anchorEl}
+                    onClose={() => setShowReschedule(false)}
+                    onSelect={handleReschedule}
+                  />
+                )}
+              </div>
+            )}
+            <div style={{ minWidth: 0 }}>
+                <p style={{ 
+                  margin: 0, 
+                  fontSize: 'var(--text-task-title)', 
+                  fontWeight: 600,
+                  lineHeight: 1.35,
+                  color: isOverdue ? 'var(--red)' : 'var(--foreground)',
+                  transition: 'color 0.2s',
+                  overflowWrap: 'anywhere',
+                  textWrap: 'pretty',
+                }}>
+                  {titleParts.title}
+                </p>
+                {titleParts.note && (
+                  <p style={{ 
+                    margin: '3px 0 0', 
+                  fontSize: 'var(--text-body)', 
+                    color: 'var(--muted)', 
+                    lineHeight: 1.45,
+                    whiteSpace: 'pre-wrap',
+                    overflowWrap: 'anywhere',
+                    maxWidth: '100%'
+                  }}>
+                    {titleParts.note}
+                  </p>
+                )}
+              {task.conflictOf && !isRecurrencePreview && (
+                <div className="task-conflict" onClick={(e) => e.stopPropagation()}>
+                  <span>Conflict copy</span>
+                  <button type="button" onClick={() => keepConflictCopy(task.id)}>Keep this version</button>
+                  <button type="button" onClick={() => deleteTask(task.id)}>Discard</button>
+                </div>
+              )}
+              {(task.isRecurring || taskTime || isRecurrencePreview || dateLabel) && (
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  flexWrap: 'wrap',
+                  gap: 10,
+                  margin: '6px 0 0',
+                  fontSize: 'var(--text-meta)',
+                  fontWeight: 500,
+                  color: 'var(--muted)',
+                }}>
+                  {dateLabel && (
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                        <rect x="3" y="4" width="18" height="18" rx="2"/>
+                        <path d="M16 2v4M8 2v4M3 10h18"/>
+                      </svg>
+                      {dateLabel}
+                    </span>
+                  )}
+                  {isRecurrencePreview && (
+                    <span style={{ textTransform: 'uppercase', letterSpacing: '0.06em', fontSize: 10 }}>
+                      Future occurrence
+                    </span>
+                  )}
+                  {task.isRecurring && (
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                        <path d="M17 1l4 4-4 4M3 11V9a4 4 0 0 1 4-4h14M7 23l-4-4 4-4M21 13v2a4 4 0 0 1-4 4H3"/>
+                      </svg>
+                      {task.recurrenceType}
+                    </span>
+                  )}
+                  {taskTime && (
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                        <circle cx="12" cy="12" r="10"/>
+                        <path d="M12 6v6l4 2"/>
+                      </svg>
+                      {taskTime}
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RescheduleMenu({ 
+  anchorEl, 
+  onClose, 
+  onSelect 
+}: { 
+  anchorEl: HTMLElement; 
+  onClose: () => void; 
+  onSelect: (date: Date) => void; 
+}) {
+  const menuRef = useRef<HTMLDivElement>(null);
+  const dateInputRef = useRef<HTMLInputElement>(null);
+
+  // Open below the button, flipping above it when there isn't room (e.g. near the footer).
+  useLayoutEffect(() => {
+    const menu = menuRef.current;
+    if (!menu) return;
+    const triggerRect = anchorEl.getBoundingClientRect();
+    const menuHeight = menu.offsetHeight;
+    const gap = 8;
+    const fitsBelow = triggerRect.bottom + gap + menuHeight <= window.innerHeight - gap;
+    const top = fitsBelow
+      ? triggerRect.bottom + gap
+      : Math.max(gap, triggerRect.top - gap - menuHeight);
+    menu.style.top = `${top}px`;
+    menu.style.left = `${Math.min(window.innerWidth - 180, Math.max(16, triggerRect.left - 80))}px`;
+    menu.style.visibility = 'visible';
+  }, [anchorEl]);
+
+  useEffect(() => {
+    menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus({ preventScroll: true });
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        onClose();
+        return;
+      }
+      if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+      const items = Array.from(menuRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? []);
+      if (items.length === 0) return;
+      e.preventDefault();
+      const index = items.indexOf(document.activeElement as HTMLElement);
+      const step = e.key === 'ArrowDown' ? 1 : -1;
+      items[(index + step + items.length) % items.length].focus();
+    };
+    document.addEventListener('keydown', handleKeyDown, true);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown, true);
+      anchorEl.focus({ preventScroll: true });
+    };
+  }, [anchorEl, onClose]);
+
+  if (typeof document === 'undefined') return null;
+
+  const today = startOfDay(new Date());
+  const nextMonday = addDays(startOfWeek(today, { weekStartsOn: 1 }), 7);
+
+  const openDatePicker = () => {
+    const input = dateInputRef.current;
+    if (!input) return;
+    try {
+      input.showPicker();
+    } catch {
+      input.focus();
+      input.click();
+    }
+  };
+
+  return createPortal(
+    <>
+      <div 
+        style={{ position: 'fixed', inset: 0, zIndex: 9998 }} 
+        onClick={(e) => {
+          e.stopPropagation();
+          onClose();
+        }}
+      />
+      <div
+        ref={menuRef}
+        role="menu"
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          visibility: 'hidden',
+          width: 160,
+          background: 'var(--card)',
+          boxShadow: 'var(--shadow-lg)',
+          padding: 6,
+          zIndex: 9999,
+          border: '1px solid var(--border)',
+          borderRadius: 'var(--radius-md)',
+        }}
+      >
+        <RescheduleOption label="Today" date={today} onClick={onSelect} />
+        <RescheduleOption label="Tomorrow" date={addDays(today, 1)} onClick={onSelect} />
+        {[2, 3, 4, 5].map(daysToAdd => {
+          const date = addDays(today, daysToAdd);
+          return (
+            <RescheduleOption 
+              key={daysToAdd}
+              label={format(date, 'EEEE')} 
+              date={date} 
+              onClick={onSelect} 
+            />
+          );
+        })}
+        <RescheduleOption label="Next week" date={nextMonday} onClick={onSelect} />
+        <div style={{ position: 'relative' }}>
+          <button
+            role="menuitem"
+            className="menu-option"
+            onClick={(e) => {
+              e.stopPropagation();
+              openDatePicker();
+            }}
+          >
+            <span style={{ fontWeight: 500 }}>Pick a date…</span>
+          </button>
+          <input
+            ref={dateInputRef}
+            type="date"
+            tabIndex={-1}
+            aria-hidden="true"
+            min={formatTaskDate(today)}
+            onClick={(e) => e.stopPropagation()}
+            onChange={(e) => {
+              if (e.target.value) onSelect(parseTaskDate(e.target.value));
+            }}
+            style={{
+              position: 'absolute',
+              inset: 0,
+              width: '100%',
+              height: '100%',
+              opacity: 0,
+              pointerEvents: 'none',
+              border: 'none',
+              padding: 0,
+            }}
+          />
+        </div>
+      </div>
+    </>,
+    document.body
+  );
+}
+
+function RescheduleOption({ label, date, onClick }: { label: string; date: Date; onClick: (d: Date) => void }) {
+  return (
+    <button
+      role="menuitem"
+      className="menu-option"
+      onClick={(e) => {
+        e.stopPropagation();
+        onClick(date);
+      }}
+    >
+      <span style={{ fontWeight: 500 }}>{label}</span>
+      <span style={{ opacity: 0.6, fontSize: 12 }}>{format(date, 'MMM d')}</span>
+    </button>
+  );
+}

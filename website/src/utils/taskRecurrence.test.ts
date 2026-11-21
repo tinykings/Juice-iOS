@@ -1,0 +1,159 @@
+import { describe, expect, it } from 'vitest';
+import { Task } from '@/types/task';
+import {
+  findSpawnedRecurrence,
+  getNextRecurrenceDate,
+  getNextRecurrenceDateAfterCompletion,
+  getRecurrenceAnchorDay,
+  withRecurrencePreviews,
+} from './taskRecurrence';
+
+const recurringTask: Task = {
+  id: 'task-1',
+  title: 'Water plants',
+  notes: '',
+  dueDate: '2026-03-10',
+  completed: false,
+  completedAt: null,
+  createdAt: '2026-03-01T12:00:00.000Z',
+  pinned: false,
+  isRecurring: true,
+  recurrenceType: 'weekly',
+  tags: [],
+};
+
+describe('recurrence previews', () => {
+  it('calculates next recurrence using calendar dates', () => {
+    expect(getNextRecurrenceDate('2026-03-10', 'daily')).toBe('2026-03-11');
+    expect(getNextRecurrenceDate('2026-03-10', 'weekly')).toBe('2026-03-17');
+    expect(getNextRecurrenceDate('2026-03-10', 'monthly')).toBe('2026-04-10');
+    expect(getNextRecurrenceDate('2026-03-10', 'yearly')).toBe('2027-03-10');
+  });
+
+  it('adds previews to extra months the caller is already showing', () => {
+    const result = withRecurrencePreviews([recurringTask], new Date(2026, 2, 1), ['2026-04']);
+    const previews = result.filter(task => task.isRecurrencePreview);
+
+    expect(previews.map(task => task.dueDate)).toContain('2026-04-07');
+  });
+
+  it('adds marked previews without making a blank future month visible', () => {
+    const result = withRecurrencePreviews([recurringTask], new Date(2026, 2, 1));
+    const previews = result.filter(task => task.isRecurrencePreview);
+
+    expect(previews.map(task => task.dueDate)).toEqual([
+      '2026-03-17',
+      '2026-03-24',
+      '2026-03-31',
+    ]);
+    expect(previews[0]).toMatchObject({
+      id: 'recurrence-preview:task-1:2026-03-17',
+      recurrenceSourceId: 'task-1',
+    });
+  });
+
+  it('fills later months that are visible because they contain real tasks', () => {
+    const normalTask: Task = {
+      ...recurringTask,
+      id: 'task-2',
+      title: 'May appointment',
+      dueDate: '2026-05-08',
+      isRecurring: false,
+      recurrenceType: null,
+    };
+    const result = withRecurrencePreviews([recurringTask, normalTask], new Date(2026, 2, 1));
+    const previewDates = result.filter(task => task.isRecurrencePreview).map(task => task.dueDate);
+
+    expect(previewDates).toEqual([
+      '2026-03-17',
+      '2026-03-24',
+      '2026-03-31',
+      '2026-05-05',
+      '2026-05-12',
+      '2026-05-19',
+      '2026-05-26',
+    ]);
+    expect(previewDates.some(date => date.startsWith('2026-04'))).toBe(false);
+  });
+
+  it('does not preview completed, deleted, undated, or non-recurring tasks', () => {
+    const variants: Task[] = [
+      { ...recurringTask, id: 'completed', completed: true },
+      { ...recurringTask, id: 'deleted', deletedAt: '2026-03-02T12:00:00.000Z' },
+      { ...recurringTask, id: 'undated', dueDate: '' },
+      { ...recurringTask, id: 'single', isRecurring: false, recurrenceType: null },
+    ];
+
+    expect(withRecurrencePreviews(variants, new Date(2026, 2, 1))).toEqual(variants);
+  });
+});
+
+describe('completing recurring tasks', () => {
+  const now = new Date(2026, 2, 15, 9, 0);
+
+  it('rolls an overdue task forward past today', () => {
+    expect(getNextRecurrenceDateAfterCompletion('2026-03-10', 'daily', now)).toBe('2026-03-16');
+    expect(getNextRecurrenceDateAfterCompletion('2026-03-01', 'weekly', now)).toBe('2026-03-22');
+  });
+
+  it('advances a task due today or later by one step', () => {
+    expect(getNextRecurrenceDateAfterCompletion('2026-03-15', 'daily', now)).toBe('2026-03-16');
+    expect(getNextRecurrenceDateAfterCompletion('2026-03-20', 'weekly', now)).toBe('2026-03-27');
+  });
+
+  it('finds the untouched occurrence spawned by a completion', () => {
+    const completedAt = '2026-03-15T09:00:00.000Z';
+    const completed: Task = { ...recurringTask, completed: true, completedAt };
+    const spawned: Task = {
+      ...recurringTask,
+      id: 'task-2',
+      dueDate: '2026-03-17',
+      createdAt: completedAt,
+      updatedAt: completedAt,
+    };
+
+    expect(findSpawnedRecurrence([completed, spawned], completed)?.id).toBe('task-2');
+    expect(findSpawnedRecurrence(
+      [completed, { ...spawned, updatedAt: '2026-03-15T10:00:00.000Z' }],
+      completed
+    )).toBeUndefined();
+  });
+});
+
+describe('recurrence previews around today', () => {
+  it('previews nothing before or on today for an overdue task', () => {
+    const overdue = { ...recurringTask, dueDate: '2026-03-01', recurrenceType: 'daily' as const };
+    const dates = withRecurrencePreviews([overdue], new Date(2026, 2, 6))
+      .filter(task => task.isRecurrencePreview)
+      .map(task => task.dueDate);
+
+    expect(dates[0]).toBe('2026-03-07');
+    expect(dates.at(-1)).toBe('2026-03-31');
+  });
+});
+
+describe('recurrence anchor day', () => {
+  it('returns to the 31st after a shorter month', () => {
+    const anchor = getRecurrenceAnchorDay('2026-01-31');
+    const february = getNextRecurrenceDate('2026-01-31', 'monthly', anchor);
+    const march = getNextRecurrenceDate(february, 'monthly', anchor);
+
+    expect(february).toBe('2026-02-28');
+    expect(march).toBe('2026-03-31');
+  });
+
+  it('returns to Feb 29 in the next leap year', () => {
+    const anchor = getRecurrenceAnchorDay('2028-02-29');
+    expect(getNextRecurrenceDate('2028-02-29', 'yearly', anchor)).toBe('2029-02-28');
+    expect(getNextRecurrenceDate('2031-02-28', 'yearly', anchor)).toBe('2032-02-29');
+  });
+
+  it('uses a stored day only while the date is the last of its month', () => {
+    expect(getRecurrenceAnchorDay('2026-02-28', 31)).toBe(31);
+    expect(getRecurrenceAnchorDay('2026-02-20', 31)).toBe(20);
+  });
+
+  it('keeps the anchor when skipping missed occurrences', () => {
+    expect(getNextRecurrenceDateAfterCompletion('2026-01-31', 'monthly', new Date(2026, 2, 1), 31)).toBe('2026-03-31');
+  });
+});

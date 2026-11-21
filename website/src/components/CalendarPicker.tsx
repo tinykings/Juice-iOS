@@ -1,0 +1,365 @@
+'use client';
+
+import { useState, useRef, useEffect, useCallback } from 'react';
+import { createPortal } from 'react-dom';
+import {
+  format,
+  startOfMonth,
+  endOfMonth,
+  startOfWeek,
+  endOfWeek,
+  addMonths,
+  subMonths,
+  eachDayOfInterval,
+  isSameMonth,
+  isSameDay,
+  parse,
+} from 'date-fns';
+
+interface CalendarPickerProps {
+  value: string; // YYYY-MM-DD
+  onChange: (value: string) => void;
+}
+
+export default function CalendarPicker({ value, onChange }: CalendarPickerProps) {
+  const [open, setOpen] = useState(false);
+  const hasDate = value !== '';
+  const selected = hasDate ? parse(value, 'yyyy-MM-dd', new Date()) : new Date();
+  const [viewMonth, setViewMonth] = useState(startOfMonth(selected));
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+  const nativeRef = useRef<HTMLInputElement>(null);
+  const [useNative, setUseNative] = useState(false);
+  const [dropdownPos, setDropdownPos] = useState<{ top: number; left: number } | null>(null);
+
+  // Detect coarse pointer (touch devices) to use native picker
+  useEffect(() => {
+    const mq = window.matchMedia('(pointer: coarse)');
+    const timer = window.setTimeout(() => setUseNative(mq.matches), 0);
+    const handler = (e: MediaQueryListEvent) => setUseNative(e.matches);
+    mq.addEventListener('change', handler);
+    return () => {
+      window.clearTimeout(timer);
+      mq.removeEventListener('change', handler);
+    };
+  }, []);
+
+  // Close on outside click
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (
+        buttonRef.current && !buttonRef.current.contains(target) &&
+        dropdownRef.current && !dropdownRef.current.contains(target)
+      ) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open]);
+
+  // Position dropdown relative to button using fixed positioning (escapes overflow)
+  useEffect(() => {
+    if (!open || !buttonRef.current) return;
+    const rect = buttonRef.current.getBoundingClientRect();
+    setDropdownPos({ top: rect.bottom + 4, left: rect.left });
+  }, [open]);
+
+  // Sync viewMonth when value changes externally
+  useEffect(() => {
+    if (value) {
+      const timer = window.setTimeout(() => {
+        setViewMonth(startOfMonth(parse(value, 'yyyy-MM-dd', new Date())));
+      }, 0);
+      return () => window.clearTimeout(timer);
+    }
+  }, [value]);
+
+  const handleSelect = useCallback((day: Date) => {
+    onChange(format(day, 'yyyy-MM-dd'));
+    setOpen(false);
+  }, [onChange]);
+
+  const days = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
+  const monthStart = startOfMonth(viewMonth);
+  const monthEnd = endOfMonth(viewMonth);
+  const calStart = startOfWeek(monthStart);
+  const calEnd = endOfWeek(monthEnd);
+  const allDays = eachDayOfInterval({ start: calStart, end: calEnd });
+  const today = new Date();
+
+  const displayText = hasDate ? format(selected, 'MMM d, yyyy') : 'No date';
+
+  // Native picker for touch devices
+  if (useNative) {
+    return (
+      <div style={{ display: 'flex', gap: 8 }}>
+        <label style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          padding: '0 14px',
+          background: 'var(--surface-inset)',
+          border: '1px solid var(--border)',
+          borderRadius: 'var(--radius-sm)',
+          fontSize: 14,
+          cursor: 'pointer',
+          height: 42,
+          transition: 'border-color 0.15s, background 0.15s',
+          color: 'var(--foreground)',
+          fontWeight: 400,
+        }}
+        className="hover-accent-border"
+        >
+          <CalendarIcon />
+          <input
+            ref={nativeRef}
+            type="date"
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            style={{
+              background: 'transparent',
+              border: 'none',
+              outline: 'none',
+              color: 'var(--foreground)',
+              fontSize: 16,
+              fontFamily: 'inherit',
+              minWidth: hasDate ? 'auto' : 80,
+            }}
+          />
+        </label>
+      </div>
+    );
+  }
+
+  // Custom calendar for desktop
+  return (
+    <div style={{ position: 'relative', display: 'flex', gap: 8 }}>
+      <button
+        ref={buttonRef}
+        type="button"
+        onClick={() => setOpen(!open)}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          padding: '0 14px',
+          background: 'var(--surface-inset)',
+          border: '1px solid var(--border)',
+          borderRadius: 'var(--radius-sm)',
+          fontSize: 14,
+          cursor: 'pointer',
+          height: 42,
+          transition: 'border-color 0.15s, background 0.15s',
+          color: 'var(--muted)',
+          fontFamily: 'inherit',
+          fontWeight: 400,
+        }}
+        className="hover-accent-border"
+      >
+        <CalendarIcon />
+        {displayText}
+      </button>
+
+      {open && dropdownPos && createPortal(
+        <div ref={dropdownRef} data-task-inline-portal="true" style={{
+          position: 'fixed',
+          top: dropdownPos.top,
+          left: dropdownPos.left,
+          background: 'var(--card)',
+          border: '1px solid var(--border)',
+          borderRadius: 'var(--radius-md)',
+          boxShadow: 'var(--shadow-lg)',
+          zIndex: 300,
+          padding: 12,
+          width: 280,
+          userSelect: 'none',
+        }}>
+          {/* Month nav */}
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            marginBottom: 8,
+          }}>
+            <button
+              type="button"
+              onClick={() => setViewMonth(subMonths(viewMonth, 1))}
+              style={navBtnStyle}
+              aria-label="Previous month"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <polyline points="15 18 9 12 15 6" />
+              </svg>
+            </button>
+            <span style={{
+              fontSize: 15,
+              fontWeight: 600,
+              color: 'var(--foreground)',
+              letterSpacing: '0.02em',
+            }}>
+              {format(viewMonth, 'MMMM yyyy')}
+            </span>
+            <button
+              type="button"
+              onClick={() => setViewMonth(addMonths(viewMonth, 1))}
+              style={navBtnStyle}
+              aria-label="Next month"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <polyline points="9 18 15 12 9 6" />
+              </svg>
+            </button>
+          </div>
+
+          {/* Day headers */}
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(7, 1fr)',
+            textAlign: 'center',
+            marginBottom: 4,
+          }}>
+            {days.map((d) => (
+              <div key={d} style={{
+                fontSize: 11,
+                fontWeight: 600,
+                color: 'var(--muted)',
+                padding: '4px 0',
+                textTransform: 'uppercase',
+                letterSpacing: '0.05em',
+              }}>
+                {d}
+              </div>
+            ))}
+          </div>
+
+          {/* Day grid */}
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(7, 1fr)',
+            gap: 2,
+          }}>
+            {allDays.map((day) => {
+              const inMonth = isSameMonth(day, viewMonth);
+              const isSelected = hasDate && isSameDay(day, selected);
+              const isToday = isSameDay(day, today);
+
+              return (
+                <DayCell
+                  key={day.toISOString()}
+                  day={day}
+                  inMonth={inMonth}
+                  isSelected={isSelected || false}
+                  isToday={isToday}
+                  onSelect={handleSelect}
+                />
+              );
+            })}
+          </div>
+
+          {/* Shortcuts */}
+          <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+            <button
+              type="button"
+              onClick={() => {
+                const t = new Date();
+                setViewMonth(startOfMonth(t));
+                handleSelect(t);
+              }}
+              style={{
+                flex: 1,
+                padding: '6px 0',
+                background: 'none',
+                border: '1px solid var(--border)',
+                borderRadius: 'var(--radius-sm)',
+                color: 'var(--accent)',
+                fontSize: 13,
+                fontWeight: 600,
+                cursor: 'pointer',
+                letterSpacing: '0.03em',
+                transition: 'border-color 0.15s, color 0.15s',
+              }}
+            >
+              Today
+            </button>
+          </div>
+        </div>,
+        document.body
+      )}
+    </div>
+  );
+}
+
+function DayCell({ day, inMonth, isSelected, isToday, onSelect }: {
+  day: Date;
+  inMonth: boolean;
+  isSelected: boolean;
+  isToday: boolean;
+  onSelect: (d: Date) => void;
+}) {
+  let bg = 'transparent';
+  let color = inMonth ? 'var(--foreground)' : 'var(--muted)';
+  let fontWeight = 400;
+  let border = '1px solid transparent';
+
+  if (isSelected) {
+    bg = 'var(--accent)';
+    color = 'var(--background)';
+    fontWeight = 700;
+  }
+
+  if (isToday && !isSelected) {
+    border = '1px solid var(--accent-border)';
+    fontWeight = 600;
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(day)}
+      className={inMonth && !isSelected ? 'picker-day' : undefined}
+      style={{
+        width: '100%',
+        aspectRatio: '1',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        fontSize: 13,
+        fontWeight,
+        background: bg,
+        color,
+        border,
+        cursor: 'pointer',
+        borderRadius: 'var(--radius-xs)',
+        padding: 0,
+        transition: 'background 0.1s',
+      }}
+    >
+      {day.getDate()}
+    </button>
+  );
+}
+
+function CalendarIcon() {
+  return (
+    <svg width="20" height="20" fill="none" stroke="var(--foreground)" strokeWidth="2" viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="3" y="4" width="18" height="18" rx="2" />
+      <path d="M16 2v4M8 2v4M3 10h18" />
+    </svg>
+  );
+}
+
+const navBtnStyle: React.CSSProperties = {
+  background: 'none',
+  border: '1px solid var(--border)',
+  borderRadius: 'var(--radius-sm)',
+  cursor: 'pointer',
+  padding: 6,
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  color: 'var(--foreground)',
+  transition: 'border-color 0.15s',
+};
