@@ -1,0 +1,621 @@
+'use client';
+
+import { useRef, useState } from 'react';
+import { useSettings } from '@/context/SettingsContext';
+import { useTheme } from '@/context/ThemeContext';
+import { useTasks } from '@/context/TaskContext';
+import { useModalFocus } from '@/hooks/useModalFocus';
+import { findOrCreateJuiceGist, loadSyncDocumentFromGist } from '@/services/gistSync';
+import { authorizeWithGitHub, isGitHubOAuthConfigured } from '@/services/githubOAuth';
+import { requestBadgePermission, isBadgeSupported } from '@/hooks/useAppBadge';
+import EncryptionSettings from '@/components/EncryptionSettings';
+import CalendarSubscriptionSettings from '@/components/CalendarSubscriptionSettings';
+import ThemePicker from '@/components/ThemePicker';
+import { getTheme } from '@/utils/theme';
+import { GistEncryptionError } from '@/services/gistCrypto';
+
+interface SettingsModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+}
+
+export default function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
+  return isOpen ? <SettingsPanel onClose={onClose} /> : null;
+}
+
+function SettingsPanel({ onClose }: { onClose: () => void }) {
+  const { gistSettings, updateGistSettings, isGistConfigured, badgeEnabled, setBadgeEnabled } = useSettings();
+  const { theme, choice } = useTheme();
+  const [isThemePickerOpen, setIsThemePickerOpen] = useState(false);
+  const isDarkTheme = getTheme(theme).mode === 'dark';
+  const { tasks, syncFromGist, syncStatus, syncError, lastSyncedAt } = useTasks();
+  const conflictCount = tasks.filter((task) => task.conflictOf && !task.completed).length;
+  const panelRef = useRef<HTMLDivElement>(null);
+  useModalFocus(panelRef, onClose);
+  
+  const [gistId, setGistId] = useState(gistSettings.gistId);
+  const [token, setToken] = useState(gistSettings.githubToken);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isConfirmingReset, setIsConfirmingReset] = useState(false);
+  const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  // Follow the saved settings if they change while open (e.g. sync finds a new Gist).
+  const [savedCredentials, setSavedCredentials] = useState({ gistId: gistSettings.gistId, token: gistSettings.githubToken });
+  if (savedCredentials.gistId !== gistSettings.gistId || savedCredentials.token !== gistSettings.githubToken) {
+    setSavedCredentials({ gistId: gistSettings.gistId, token: gistSettings.githubToken });
+    setGistId(gistSettings.gistId);
+    setToken(gistSettings.githubToken);
+  }
+
+  const syncLabel = !isGistConfigured
+    ? 'Auto-sync disabled'
+    : syncStatus === 'syncing'
+      ? 'Syncing...'
+      : syncStatus === 'error'
+        ? 'Sync error'
+        : conflictCount > 0
+          ? 'Conflict to review'
+          : 'Auto-sync enabled';
+  const syncDotColor = !isGistConfigured
+    ? 'var(--muted)'
+    : syncStatus === 'error'
+      ? 'var(--red)'
+      : conflictCount > 0
+        ? 'var(--accent)'
+        : 'var(--green)';
+  const syncDescription = syncError
+    ?? (conflictCount > 0
+      ? 'Two devices edited the same task, so Juice kept both versions. Look for "Conflict copy" in your task list to keep or discard each one.'
+      : lastSyncedAt
+        ? `Last synced ${new Date(lastSyncedAt).toLocaleString()}`
+        : 'Tasks will automatically sync to your Gist when changed.');
+
+  const handleResetApp = () => {
+    if (!isConfirmingReset) {
+      setIsConfirmingReset(true);
+      return;
+    }
+
+    const keysToRemove: string[] = [];
+    for (let index = 0; index < window.localStorage.length; index += 1) {
+      const key = window.localStorage.key(index);
+      if (key?.startsWith('juice-')) keysToRemove.push(key);
+    }
+    keysToRemove.forEach((key) => window.localStorage.removeItem(key));
+    window.location.reload();
+  };
+
+  const handleGitHubConnect = async () => {
+    setIsLoading(true);
+    setMessage(null);
+
+    try {
+      const authorization = await authorizeWithGitHub();
+      const foundGistId = await findOrCreateJuiceGist(tasks, authorization.token, gistSettings.encryptionKey);
+      let loadedCount: number | null = null;
+      try {
+        const loadedDocument = await loadSyncDocumentFromGist({
+          gistId: foundGistId,
+          githubToken: authorization.token,
+          encryptionKey: gistSettings.encryptionKey,
+        });
+        loadedCount = loadedDocument.tasks.length;
+      } catch (error) {
+        // An encrypted Gist still connects; sync waits until the key is entered below.
+        if (!(error instanceof GistEncryptionError)) throw error;
+      }
+
+      setGistId(foundGistId);
+      setToken(authorization.token);
+      updateGistSettings({
+        gistId: foundGistId,
+        githubToken: authorization.token,
+        githubLogin: authorization.login,
+      });
+      setMessage({
+        type: 'success',
+        text: loadedCount === null
+          ? `Connected as @${authorization.login}. This Gist is encrypted: enter your key below to sync.`
+          : `Connected as @${authorization.login}. Merging ${loadedCount} Gist tasks with local tasks.`,
+      });
+    } catch (error) {
+      setMessage({ type: 'error', text: error instanceof Error ? error.message : 'GitHub sign-in failed' });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleLoadFromGist = async () => {
+    if (!gistId || !token) {
+      setMessage({ type: 'error', text: 'Please enter both Gist ID and GitHub token' });
+      return;
+    }
+
+    setIsLoading(true);
+    setMessage(null);
+
+    try {
+      const loadedDocument = await loadSyncDocumentFromGist({ gistId, githubToken: token, encryptionKey: gistSettings.encryptionKey });
+      const settingsChanged = gistId !== gistSettings.gistId || token !== gistSettings.githubToken;
+      updateGistSettings({ gistId, githubToken: token });
+      // Changed credentials trigger TaskProvider's normal three-way sync. If
+      // these are the existing credentials, trigger that merge explicitly.
+      if (!settingsChanged) {
+        await syncFromGist();
+      }
+      setMessage({
+        type: 'success',
+        text: `Connection verified. Merging ${loadedDocument.tasks.length} Gist tasks with local tasks.`,
+      });
+    } catch (error) {
+      setMessage({ type: 'error', text: error instanceof Error ? error.message : 'Failed to load from Gist' });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="settings-title"
+      style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'rgba(15, 14, 12, 0.72)',
+        backdropFilter: 'blur(10px)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        zIndex: 100,
+        padding: 16,
+      }}
+      onClick={(e) => e.target === e.currentTarget && onClose()}
+    >
+      <div
+        ref={panelRef}
+        tabIndex={-1}
+        style={{
+          outline: 'none',
+          background: 'var(--card)',
+          width: '100%',
+          maxWidth: 460,
+          maxHeight: 'calc(100dvh - 32px)',
+          overflow: 'auto',
+          boxShadow: 'var(--shadow-lg)',
+          border: '1px solid var(--border)',
+          borderRadius: 'var(--radius-md)',
+          animation: 'scaleIn 140ms ease-out both',
+        }}
+      >
+        {/* Header */}
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          padding: '16px 18px',
+          borderBottom: '1px solid var(--border)',
+        }}>
+          <h2 id="settings-title" style={{
+            fontSize: 20,
+            fontWeight: 700,
+            margin: 0,
+            fontFamily: 'var(--font-body)',
+            color: 'var(--foreground)',
+            lineHeight: 1.25,
+          }}>Settings</h2>
+          <button
+            onClick={onClose}
+            aria-label="Close settings"
+            style={{
+              background: 'var(--surface-inset)',
+              border: '1px solid var(--border)',
+              borderRadius: 'var(--radius-sm)',
+              cursor: 'pointer',
+              color: 'var(--muted)',
+              padding: 0,
+              width: 42,
+              height: 42,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              transition: 'background 0.15s, border-color 0.15s, color 0.15s',
+            }}
+            className="hover-surface"
+          >
+            <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2.25" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M18 6L6 18M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        {/* Content */}
+        <div style={{ padding: 18 }}>
+          {/* Theme & Badge buttons row */}
+          <div style={{ display: 'grid', gridTemplateColumns: isBadgeSupported() ? '1fr 1fr' : '1fr', gap: 10, marginBottom: 16 }}>
+            <button
+              onClick={() => setIsThemePickerOpen(open => !open)}
+              aria-expanded={isThemePickerOpen}
+              style={{
+                flex: 1,
+                padding: '0 14px',
+                fontSize: 14,
+                fontWeight: 600,
+                border: '1px solid var(--border)',
+                borderRadius: 'var(--radius-sm)',
+                background: 'var(--surface-inset)',
+                color: 'var(--foreground)',
+                cursor: 'pointer',
+                height: 42,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 8,
+                transition: 'background 0.15s, border-color 0.15s, color 0.15s',
+              }}
+              className="hover-surface-accent"
+            >
+              {isDarkTheme ? (
+                <svg width="18" height="18" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M12 3a9 9 0 109 9c0-.46-.04-.92-.1-1.36a5.389 5.389 0 01-4.4 2.26 5.403 5.403 0 01-3.14-9.8c-.44-.06-.9-.1-1.36-.1z"/>
+                </svg>
+              ) : (
+                <svg width="18" height="18" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                  <circle cx="12" cy="12" r="5"/>
+                  <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
+                </svg>
+              )}
+              <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                Theme: {choice === 'system' ? 'System' : getTheme(theme).name}
+              </span>
+            </button>
+            {isBadgeSupported() && (
+              <button
+                onClick={async () => {
+                  if (badgeEnabled) {
+                    setBadgeEnabled(false);
+                  } else {
+                    const granted = await requestBadgePermission();
+                    if (granted) {
+                      setBadgeEnabled(true);
+                    } else {
+                      setMessage({ type: 'error', text: 'Notification permission is required for app badges on iOS.' });
+                    }
+                  }
+                }}
+                  style={{
+                    flex: 1,
+                    padding: '0 14px',
+                    fontSize: 14,
+                    fontWeight: 600,
+                    border: '1px solid',
+                    borderRadius: 'var(--radius-sm)',
+                    borderColor: badgeEnabled ? 'var(--accent-border)' : 'var(--border)',
+                    background: badgeEnabled ? 'var(--accent-surface)' : 'var(--surface-inset)',
+                    color: badgeEnabled ? 'var(--accent)' : 'var(--foreground)',
+                    cursor: 'pointer',
+                    height: 42,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: 8,
+                    transition: 'background 0.15s, border-color 0.15s, color 0.15s',
+                  }}
+                  className="hover-surface-accent"
+                  data-active={badgeEnabled || undefined}
+                  aria-pressed={badgeEnabled}
+              >
+                <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+                  <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+                </svg>
+                App badge: {badgeEnabled ? 'On' : 'Off'}
+              </button>
+            )}
+          </div>
+
+          {isThemePickerOpen && <ThemePicker />}
+
+          <div style={{
+            background: 'var(--task-surface)',
+            border: '1px solid var(--border)',
+            borderRadius: 'var(--radius-md)',
+            padding: 16,
+            marginBottom: 14,
+          }}>
+            <h3 style={{
+              fontSize: 17,
+              fontWeight: 700,
+              margin: '0 0 8px',
+              color: 'var(--foreground)',
+              fontFamily: 'var(--font-body)',
+              lineHeight: 1.3,
+            }}>
+              GitHub Gist Sync
+            </h3>
+            <p style={{ fontSize: 14, color: 'var(--muted)', margin: 0, lineHeight: 1.5 }}>
+              Sync tasks across devices using a secret GitHub Gist. GitHub grants Juice permission to manage your Gists.
+            </p>
+            {gistSettings.githubLogin && isGistConfigured && (
+              <p style={{ fontSize: 13, color: 'var(--green)', margin: '8px 0 0', fontWeight: 650 }}>
+                Connected as @{gistSettings.githubLogin}
+              </p>
+            )}
+          </div>
+
+          <button
+            type="button"
+            onClick={() => void handleGitHubConnect()}
+            disabled={isLoading || !isGitHubOAuthConfigured()}
+            style={{
+              width: '100%',
+              height: 44,
+              marginBottom: 14,
+              border: '1px solid var(--accent)',
+              borderRadius: 'var(--radius-sm)',
+              background: 'var(--accent)',
+              color: 'var(--background)',
+              cursor: isLoading || !isGitHubOAuthConfigured() ? 'not-allowed' : 'pointer',
+              opacity: isLoading || !isGitHubOAuthConfigured() ? 0.55 : 1,
+              fontSize: 14,
+              fontWeight: 750,
+            }}
+          >
+            {isLoading ? 'Connecting…' : isGistConfigured ? 'Reconnect GitHub' : 'Connect GitHub'}
+          </button>
+
+          {!isGitHubOAuthConfigured() && (
+            <p style={{ margin: '-6px 0 14px', color: 'var(--muted)', fontSize: 12, lineHeight: 1.4 }}>
+              GitHub sign-in is not configured for this deployment. Manual setup remains available below.
+            </p>
+          )}
+
+          {message && (
+            <div style={{
+              padding: '12px 14px',
+              borderRadius: 'var(--radius-sm)',
+              marginBottom: 14,
+              fontSize: 14,
+              background: message.type === 'success' ? 'rgba(46, 204, 113, 0.1)' : 'rgba(255, 107, 107, 0.08)',
+              border: `1px solid ${message.type === 'success' ? 'rgba(46, 204, 113, 0.28)' : 'rgba(255, 107, 107, 0.22)'}`,
+              color: message.type === 'success' ? 'var(--green)' : 'var(--red)',
+              fontWeight: 600,
+              lineHeight: 1.4,
+            }}>
+              {message.text}
+            </div>
+          )}
+
+          <details style={{ marginBottom: 14 }}>
+            <summary style={{ cursor: 'pointer', color: 'var(--muted)', fontSize: 13, fontWeight: 650, marginBottom: 12 }}>
+              Advanced: connect with Gist ID and token
+            </summary>
+          <form onSubmit={(e) => { e.preventDefault(); handleLoadFromGist(); }}>
+            {/* Gist ID */}
+            <div style={{ marginBottom: 14 }}>
+              <label htmlFor="username" style={{
+                display: 'block',
+                fontSize: 'var(--text-meta)',
+                fontWeight: 700,
+                color: 'var(--muted)',
+                marginBottom: 8,
+                textTransform: 'uppercase',
+                letterSpacing: '0.05em',
+              }}>
+                Gist ID
+              </label>
+              <input
+                id="username"
+                name="username"
+                type="text"
+                autoComplete="username"
+                value={gistId}
+                onChange={(e) => setGistId(e.target.value)}
+                placeholder="abc123def456..."
+                style={{
+                  width: '100%',
+                  padding: '0 12px',
+                  fontSize: 16,
+                  border: '1px solid var(--border)',
+                  borderRadius: 'var(--radius-sm)',
+                  background: 'var(--surface-inset)',
+                  color: 'var(--foreground)',
+                  outline: 'none',
+                  boxSizing: 'border-box',
+                  height: 42,
+                  transition: 'border-color 0.15s, background 0.15s, box-shadow 0.15s'
+                }}
+                onFocus={(e) => {
+                  e.target.style.borderColor = 'var(--accent-border)';
+                  e.target.style.background = 'var(--surface-hover)';
+                  e.target.style.boxShadow = '0 0 0 3px var(--accent-subtle)';
+                }}
+                onBlur={(e) => {
+                  e.target.style.borderColor = 'var(--border)';
+                  e.target.style.background = 'var(--surface-inset)';
+                  e.target.style.boxShadow = 'none';
+                }}
+              />
+            </div>
+
+            {/* GitHub Token */}
+            <div style={{ marginBottom: 14 }}>
+              <label htmlFor="password" style={{
+                display: 'block',
+                fontSize: 'var(--text-meta)',
+                fontWeight: 700,
+                color: 'var(--muted)',
+                marginBottom: 8,
+                textTransform: 'uppercase',
+                letterSpacing: '0.05em',
+              }}>
+                GitHub Token
+              </label>
+              <input
+                id="password"
+                name="password"
+                type="password"
+                autoComplete="current-password"
+                value={token}
+                onChange={(e) => setToken(e.target.value)}
+                placeholder="ghp_xxxxxxxxxxxx"
+                style={{
+                  width: '100%',
+                  padding: '0 12px',
+                  fontSize: 16,
+                  border: '1px solid var(--border)',
+                  borderRadius: 'var(--radius-sm)',
+                  background: 'var(--surface-inset)',
+                  color: 'var(--foreground)',
+                  outline: 'none',
+                  boxSizing: 'border-box',
+                  height: 42,
+                  transition: 'border-color 0.15s, background 0.15s, box-shadow 0.15s'
+                }}
+                onFocus={(e) => {
+                  e.target.style.borderColor = 'var(--accent-border)';
+                  e.target.style.background = 'var(--surface-hover)';
+                  e.target.style.boxShadow = '0 0 0 3px var(--accent-subtle)';
+                }}
+                onBlur={(e) => {
+                  e.target.style.borderColor = 'var(--border)';
+                  e.target.style.background = 'var(--surface-inset)';
+                  e.target.style.boxShadow = 'none';
+                }}
+              />
+            </div>
+
+            {/* Buttons */}
+            <button
+              type="submit"
+              disabled={isLoading || !gistId || !token}
+              style={{
+                width: '100%',
+                padding: '0 16px',
+                fontSize: 14,
+                fontWeight: 700,
+                border: '1px solid',
+                borderColor: isLoading || !gistId || !token ? 'var(--border)' : 'var(--accent)',
+                borderRadius: 'var(--radius-sm)',
+                background: isLoading || !gistId || !token ? 'var(--muted-light)' : 'var(--accent)',
+                color: isLoading || !gistId || !token ? 'var(--muted)' : 'var(--background)',
+                cursor: isLoading || !gistId || !token ? 'not-allowed' : 'pointer',
+                height: 42,
+                transition: 'background 0.15s, border-color 0.15s',
+              }}
+              className="hover-fill-accent"
+            >
+              {isLoading ? 'Connecting...' : 'Connect & Merge with Gist'}
+            </button>
+          </form>
+          </details>
+
+          {/* Sync Status */}
+          <div style={{ 
+            marginTop: 14, 
+            padding: '14px', 
+            background: 'var(--task-surface)', 
+            border: '1px solid var(--border)',
+            borderRadius: 'var(--radius-md)',
+            fontSize: 14,
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <div style={{
+                width: 10,
+                height: 10,
+                borderRadius: '50%',
+                background: syncDotColor,
+              }} />
+              <span style={{ color: 'var(--foreground)', fontSize: 15, fontWeight: 650 }}>
+                {syncLabel}
+              </span>
+            </div>
+            {isGistConfigured && (
+              <>
+                <p style={{ margin: '8px 0 0', color: 'var(--muted)', fontSize: 14, lineHeight: 1.45 }}>
+                  {syncDescription}
+                </p>
+                {syncStatus === 'error' && (
+                  <button
+                    type="button"
+                    onClick={() => void syncFromGist()}
+                    style={{
+                      marginTop: 10,
+                      padding: '7px 12px',
+                      border: '1px solid var(--red)',
+                      borderRadius: 'var(--radius-sm)',
+                      background: 'transparent',
+                      color: 'var(--red)',
+                      fontSize: 13,
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    Retry sync
+                  </button>
+                )}
+              </>
+            )}
+          </div>
+
+          <EncryptionSettings />
+
+          <CalendarSubscriptionSettings />
+
+          <div style={{
+            marginTop: 14,
+            padding: 14,
+            border: '1px solid var(--border)',
+            borderRadius: 'var(--radius-md)',
+          }}>
+            <div style={{ color: 'var(--foreground)', fontSize: 15, fontWeight: 700 }}>
+              Reset App
+            </div>
+            <p style={{ margin: '6px 0 12px', color: 'var(--muted)', fontSize: 13, lineHeight: 1.45 }}>
+              Clears all local tasks, settings, sync history, Gist ID, and GitHub token. This does not delete the Gist itself.
+            </p>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button
+                type="button"
+                onClick={handleResetApp}
+                style={{
+                  flex: 1,
+                  height: 40,
+                  border: `1px solid ${isConfirmingReset ? 'var(--red)' : 'var(--border)'}`,
+                  borderRadius: 'var(--radius-sm)',
+                  background: isConfirmingReset ? 'var(--red)' : 'transparent',
+                  color: isConfirmingReset ? 'var(--background)' : 'var(--red)',
+                  cursor: 'pointer',
+                  fontSize: 14,
+                  fontWeight: 700,
+                }}
+              >
+                {isConfirmingReset ? 'Confirm Reset' : 'Reset App'}
+              </button>
+              {isConfirmingReset && (
+                <button
+                  type="button"
+                  onClick={() => setIsConfirmingReset(false)}
+                  style={{
+                    height: 40,
+                    padding: '0 14px',
+                    border: '1px solid var(--border)',
+                    borderRadius: 'var(--radius-sm)',
+                    background: 'transparent',
+                    color: 'var(--muted)',
+                    cursor: 'pointer',
+                    fontSize: 14,
+                    fontWeight: 650,
+                  }}
+                >
+                  Cancel
+                </button>
+              )}
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  );
+}

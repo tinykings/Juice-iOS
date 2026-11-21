@@ -1,0 +1,585 @@
+'use client';
+
+import { useCallback, useEffect, useRef, useState, useMemo } from 'react';
+import { format } from 'date-fns';
+import { Task, RecurrenceType } from '@/types/task';
+import { useTasks } from '@/context/TaskContext';
+import CalendarPicker from './CalendarPicker';
+import ConfirmCompleteDialog from './ConfirmCompleteDialog';
+import { findDateWordInTitle, removeDateWord, DateWordMatch } from '@/utils/dateWords';
+import { normalizeTaskDate } from '@/utils/taskDate';
+import { findTaskTime } from '@/utils/taskTime';
+import { splitTaskTitle } from '@/utils/taskTitle';
+
+export function TaskForm({ editTask, onClose, onSave, onDateChange, dismissRef, initialDate, inline = false, isClosing = false, captureUrlMode = false }: {
+  editTask?: Task | null;
+  onClose: () => void;
+  onSave?: () => void;
+  /** Reports the day the task would be saved on, including a date typed in the title. */
+  onDateChange?: (date: string) => void;
+  /** Filled with a function for tapping away: it saves what was typed and closes the form. */
+  dismissRef?: React.RefObject<(() => void) | null>;
+  initialDate?: string | null;
+  inline?: boolean;
+  isClosing?: boolean;
+  captureUrlMode?: boolean;
+}) {
+  const { addTask, addTaskFromCaptureUrl, updateTask, deleteTask } = useTasks();
+  const titleRef = useRef<HTMLTextAreaElement>(null);
+  const hasFocusedRef = useRef(false);
+  // The form stays on screen while it animates closed; a second Enter must not save again.
+  const hasSubmittedRef = useRef(false);
+
+  const initialDueDate = editTask
+    ? normalizeTaskDate(editTask.dueDate)
+    : (initialDate || format(new Date(), 'yyyy-MM-dd'));
+  
+  const [dueDate, setDueDate] = useState(initialDueDate);
+  const initialTitle = editTask?.notes
+    ? `${editTask.title}${editTask.title.trim().endsWith('.') ? '' : '.'} ${editTask.notes}`
+    : editTask?.title || '';
+  const [titleValue, setTitleValue] = useState(initialTitle);
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  // A date word already in an edited title is just part of its wording; only a
+  // newly typed one should move the task.
+  const [originalDateWord] = useState(() => (editTask ? findDateWordInTitle(initialTitle)?.word.toLowerCase() ?? null : null));
+  const findNewDateWord = useCallback((value: string): DateWordMatch | null => {
+    const match = findDateWordInTitle(value);
+    if (!match || match.word.toLowerCase() === originalDateWord) return null;
+    return match;
+  }, [originalDateWord]);
+
+  const dateWordMatch = useMemo<DateWordMatch | null>(
+    () => findNewDateWord(titleValue),
+    [findNewDateWord, titleValue]
+  );
+
+  const highlights = useMemo(() => {
+    const items: Array<{ start: number; end: number; color: string }> = [];
+
+    if (dateWordMatch) {
+      items.push({
+        start: dateWordMatch.index,
+        end: dateWordMatch.index + dateWordMatch.word.length,
+        color: 'var(--accent)',
+      });
+    }
+
+    const time = findTaskTime(titleValue);
+    if (time) {
+      items.push({
+        start: time.index,
+        end: time.index + time.text.length,
+        color: 'var(--event)',
+      });
+    }
+
+    items.sort((a, b) => a.start - b.start);
+    return items;
+  }, [titleValue, dateWordMatch]);
+
+  const [showHelp, setShowHelp] = useState(false);
+  const [isConfirmingDelete, setIsConfirmingDelete] = useState(false);
+  const [originalData] = useState(() => ({
+    title: initialTitle,
+    dueDate: initialDueDate,
+    isRecurring: editTask?.isRecurring || false,
+    recurrenceType: editTask?.recurrenceType || 'daily'
+  }));
+
+  const [isRecurring, setIsRecurring] = useState(() => editTask?.isRecurring ?? false);
+  const [recurrenceType, setRecurrenceType] = useState<RecurrenceType>(() => editTask?.recurrenceType || 'daily');
+
+  const hasChanges = useMemo(() => (
+    titleValue !== originalData.title ||
+    dueDate !== originalData.dueDate ||
+    isRecurring !== originalData.isRecurring ||
+    (isRecurring && recurrenceType !== originalData.recurrenceType)
+  ), [dueDate, isRecurring, originalData, recurrenceType, titleValue]);
+
+  const focusTitle = useCallback(() => {
+    const input = titleRef.current;
+    const active = document.activeElement;
+    if (input && active !== input && active?.tagName !== 'INPUT' && active?.tagName !== 'TEXTAREA') {
+      input.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      input.focus();
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!editTask && !hasFocusedRef.current) {
+      hasFocusedRef.current = true;
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          setTimeout(focusTitle, 400);
+        });
+      });
+    }
+  }, [editTask, focusTitle]);
+
+  useEffect(() => {
+    if (editTask) {
+      hasFocusedRef.current = false;
+    }
+  }, [editTask]);
+
+  const submit = useCallback(async () => {
+    let title = titleValue.trim();
+
+    if (!title || isSaving || hasSubmittedRef.current) return;
+
+    // Nothing to save, and saving anyway would mark the task as edited for sync.
+    if (editTask && !hasChanges) {
+      hasSubmittedRef.current = true;
+      onClose();
+      return;
+    }
+
+    let effectiveDueDate = dueDate;
+
+    const match = findNewDateWord(title);
+    if (match) {
+      effectiveDueDate = format(match.date, 'yyyy-MM-dd');
+      title = removeDateWord(title, match);
+    }
+
+    // A task that keeps its note in the separate field (e.g. from the iOS app) stays that way.
+    let notes = '';
+    if (editTask?.notes) {
+      const parts = splitTaskTitle(title);
+      title = parts.title;
+      notes = parts.note;
+    }
+
+    // Tasks always get a date; an undated one (e.g. made in the iOS app) keeps
+    // no date until one is picked, and shows under Overdue meanwhile.
+    const normalizedDueDate = effectiveDueDate ? normalizeTaskDate(effectiveDueDate) : '';
+    const taskData = {
+      title,
+      notes,
+      dueDate: normalizedDueDate,
+      pinned: false,
+      isRecurring: normalizedDueDate ? isRecurring : false,
+      recurrenceType: normalizedDueDate && isRecurring ? recurrenceType : null,
+      tags: [],
+    };
+
+    if (editTask) {
+      updateTask(editTask.id, taskData);
+    } else if (captureUrlMode) {
+      setIsSaving(true);
+      setSaveError(null);
+      try {
+        await addTaskFromCaptureUrl(taskData);
+      } catch (error) {
+        setSaveError(error instanceof Error ? error.message : 'Could not save the task.');
+        return;
+      } finally {
+        setIsSaving(false);
+      }
+    } else {
+      addTask(taskData);
+    }
+
+    hasSubmittedRef.current = true;
+    onClose();
+    if (onSave) onSave();
+  }, [addTask, addTaskFromCaptureUrl, captureUrlMode, dueDate, editTask, findNewDateWord, hasChanges, isRecurring, isSaving, onClose, onSave, recurrenceType, updateTask, titleValue]);
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    void submit();
+  };
+
+  // Tapping away keeps the work: only Escape or the close button discard it.
+  useEffect(() => {
+    if (!dismissRef) return;
+    dismissRef.current = () => {
+      if (isClosing || hasSubmittedRef.current) return;
+      if (titleValue.trim() && (!editTask || hasChanges)) void submit();
+      else onClose();
+    };
+    return () => {
+      dismissRef.current = null;
+    };
+  }, [dismissRef, editTask, hasChanges, isClosing, onClose, submit, titleValue]);
+
+  const effectiveDate = dateWordMatch ? format(dateWordMatch.date, 'yyyy-MM-dd') : dueDate;
+  useEffect(() => {
+    onDateChange?.(effectiveDate);
+  }, [effectiveDate, onDateChange]);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (isConfirmingDelete) return;
+      if (e.key === 'Escape') onClose();
+      // Buttons keep their own Enter: Delete shouldn't save.
+      if (e.key === 'Enter' && editTask && hasChanges && !(e.target instanceof HTMLTextAreaElement) && !(e.target instanceof HTMLButtonElement)) {
+        e.preventDefault();
+        void submit();
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    if (!inline) {
+      document.body.style.overflow = 'hidden';
+    }
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+      if (!inline) {
+        document.body.style.overflow = '';
+      }
+    };
+  }, [editTask, hasChanges, inline, isConfirmingDelete, onClose, submit]);
+
+  const handleDelete = () => {
+    setIsConfirmingDelete(true);
+  };
+
+  const handleConfirmDelete = () => {
+    if (editTask) {
+      deleteTask(editTask.id);
+      onClose();
+    }
+  };
+
+  useEffect(() => {
+    const textarea = titleRef.current;
+    if (textarea) {
+      textarea.style.height = 'auto';
+      textarea.style.height = textarea.scrollHeight + 'px';
+    }
+  }, []);
+
+  return (
+    <form
+      onSubmit={handleSubmit}
+      data-task-inline-form={inline ? 'true' : undefined}
+      style={inline ? {
+        width: '100%',
+        alignSelf: 'stretch',
+        background: 'var(--task-surface)',
+        border: '1px solid var(--accent-border)',
+        borderRadius: 'var(--radius-md)',
+        boxShadow: '0 0 0 1px var(--accent-subtle)',
+        overflow: 'hidden',
+        transformOrigin: 'top',
+        animation: isClosing
+          ? 'inlineTaskClose 180ms cubic-bezier(0.4, 0, 0.2, 1) forwards'
+          : 'inlineTaskOpen 180ms cubic-bezier(0.16, 1, 0.3, 1) both',
+      } : undefined}
+    >
+      {/* Inputs */}
+      <div style={{ padding: '16px 16px 12px' }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, marginBottom: 0 }}>
+          <div style={{ position: 'relative', flex: 1, minWidth: 0 }}>
+            <textarea
+              ref={titleRef}
+              name="title"
+              placeholder="New task"
+              aria-label="Task title"
+              rows={1}
+              value={titleValue}
+              autoFocus={!editTask}
+              onChange={(e) => {
+                setTitleValue(e.target.value);
+                e.target.style.height = 'auto';
+                e.target.style.height = e.target.scrollHeight + 'px';
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  if (!editTask || hasChanges) {
+                    void submit();
+                  }
+                }
+              }}
+              style={{
+                width: '100%',
+                fontSize: 19,
+                fontWeight: 600,
+                background: 'var(--surface-inset)',
+                border: '1px solid var(--border)',
+                borderRadius: 'var(--radius-sm)',
+                outline: 'none',
+                color: 'var(--foreground)',
+                caretColor: 'var(--foreground)',
+                padding: '10px 12px',
+                lineHeight: 1.4,
+                fontFamily: 'var(--font-body)',
+                transition: 'border-color 0.15s, background 0.15s, box-shadow 0.15s',
+                resize: 'none',
+                overflow: 'hidden',
+              }}
+              onFocus={(e) => {
+                e.target.style.borderColor = 'var(--accent-border)';
+                e.target.style.background = 'var(--surface-hover)';
+              }}
+              onBlur={(e) => {
+                e.target.style.borderColor = 'var(--border)';
+                e.target.style.background = 'var(--surface-inset)';
+              }}
+            />
+            <div aria-hidden="true" style={{
+              position: 'absolute',
+              inset: 0,
+              // Same box and wrapping as the textarea, so highlights land on the typed words.
+              border: '1px solid transparent',
+              overflowWrap: 'break-word',
+              padding: '10px 12px',
+              pointerEvents: 'none',
+              fontSize: 19,
+              fontWeight: 600,
+              lineHeight: 1.4,
+              fontFamily: 'var(--font-body)',
+              color: 'transparent',
+              whiteSpace: 'pre-wrap',
+            }}>
+              {titleValue ? (() => {
+                if (highlights.length === 0) {
+                  return <span style={{ color: 'transparent' }}>{titleValue}</span>;
+                }
+
+                const segs: React.ReactNode[] = [];
+                let pos = 0;
+                for (const h of highlights) {
+                  if (h.start > pos) {
+                    segs.push(<span key={`t${pos}`} style={{ color: 'transparent' }}>{titleValue.slice(pos, h.start)}</span>);
+                  }
+                  segs.push(
+                    <span key={`h${h.start}`} style={{ color: h.color, fontWeight: 600 }}>
+                      {titleValue.slice(h.start, h.end)}
+                    </span>
+                  );
+                  pos = h.end;
+                }
+                if (pos < titleValue.length) {
+                  segs.push(<span key={`t${pos}`} style={{ color: 'transparent' }}>{titleValue.slice(pos)}</span>);
+                }
+                return segs;
+              })() : (
+                <span style={{ color: 'var(--muted)' }}>New task</span>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Options */}
+      <div style={{ padding: '0 16px 14px', display: 'flex', flexWrap: 'wrap', gap: 10 }}>
+        <CalendarPicker value={dueDate} onChange={setDueDate} />
+
+        <button
+          type="button"
+          onClick={() => {
+            const nextIsRecurring = !isRecurring;
+            setIsRecurring(nextIsRecurring);
+          }}
+          className="hover-accent-outline"
+          aria-pressed={isRecurring}
+          data-active={isRecurring || undefined}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            padding: '0 14px',
+            background: isRecurring ? 'var(--accent-surface)' : 'var(--surface-inset)',
+            color: isRecurring ? 'var(--accent)' : 'var(--muted)',
+            border: isRecurring ? '1px solid var(--accent-border)' : '1px solid var(--border)',
+            borderRadius: 'var(--radius-sm)',
+            fontSize: 14,
+            cursor: 'pointer',
+            height: 42,
+            fontWeight: 500,
+            transition: 'background 0.15s, border-color 0.15s, color 0.15s'
+          }}
+        >
+          <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M17 1l4 4-4 4M3 11V9a4 4 0 0 1 4-4h14M7 23l-4-4 4-4M21 13v2a4 4 0 0 1-4 4H3"/>
+          </svg>
+          Repeat
+        </button>
+      </div>
+
+      {/* Recurrence options */}
+      {isRecurring && (
+        <div style={{ 
+          padding: '0 16px 14px', 
+          display: 'grid', 
+          gridTemplateColumns: '1fr 1fr',
+          gap: 10
+        }}>
+          {(['daily', 'weekly', 'monthly', 'yearly'] as const).map((type) => (
+            <button
+              key={type}
+              type="button"
+              onClick={() => {
+                setRecurrenceType(type);
+              }}
+              className="hover-accent-outline"
+              aria-pressed={recurrenceType === type}
+              data-active={recurrenceType === type || undefined}
+              style={{
+                padding: '0 14px',
+                fontSize: 13,
+                fontWeight: 600,
+                textTransform: 'uppercase',
+                letterSpacing: '0.05em',
+                background: recurrenceType === type ? 'var(--foreground)' : 'var(--background)',
+                color: recurrenceType === type ? 'var(--background)' : 'var(--muted)',
+                border: '1px solid var(--border)',
+                borderRadius: 'var(--radius-sm)',
+                cursor: 'pointer',
+                height: 40,
+                transition: 'all 0.2s'
+              }}
+            >
+              {type}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Quick-add help */}
+      {showHelp && (
+        <div style={{
+          padding: '14px 16px',
+          background: 'var(--surface-inset)',
+          borderTop: '1px solid var(--border)',
+          fontSize: 14,
+          lineHeight: 1.6,
+          color: 'var(--foreground)',
+        }}>
+          <div style={{ fontWeight: 600, marginBottom: 8, color: 'var(--muted)', fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Quick-add syntax</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div><span style={{ color: 'var(--accent)', fontWeight: 600 }}>today</span> — due today</div>
+            <div><span style={{ color: 'var(--accent)', fontWeight: 600 }}>tomorrow</span> — due tomorrow</div>
+            <div><span style={{ color: 'var(--accent)', fontWeight: 600 }}>next week</span> — next Monday</div>
+            <div><span style={{ color: 'var(--accent)', fontWeight: 600 }}>next month</span> — 1st of next month</div>
+            <div><span style={{ color: 'var(--accent)', fontWeight: 600 }}>mon</span>, <span style={{ color: 'var(--accent)', fontWeight: 600 }}>tue</span>, … — next occurrence</div>
+            <div><span style={{ color: 'var(--accent)', fontWeight: 600 }}>jan 15</span>, <span style={{ color: 'var(--accent)', fontWeight: 600 }}>15 jan</span> — specific date</div>
+            <div style={{ marginTop: 4 }}><span style={{ color: 'var(--event)', fontWeight: 600 }}>@9am</span>, <span style={{ color: 'var(--event)', fontWeight: 600 }}>@530</span>, <span style={{ color: 'var(--event)', fontWeight: 600 }}>@2:30pm</span> — set time</div>
+            <div><span style={{ color: 'var(--muted)', fontWeight: 600 }}>.</span> text after a period becomes a note</div>
+          </div>
+        </div>
+      )}
+
+      {/* Actions */}
+      <div style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        padding: '12px 16px',
+        background: 'var(--card)',
+        borderTop: '1px solid var(--border)'
+      }}>
+        <div style={{ display: 'flex', gap: 10 }}>
+          <button
+            type="button"
+            onClick={() => setShowHelp(!showHelp)}
+            aria-label="Quick-add help"
+            aria-expanded={showHelp}
+            className="hover-accent-outline"
+            style={{
+              width: 42,
+              height: 42,
+              fontSize: 14,
+              fontWeight: 700,
+              color: showHelp ? 'var(--accent)' : 'var(--muted)',
+              background: showHelp ? 'var(--accent-surface)' : 'var(--surface-inset)',
+              border: showHelp ? '1px solid var(--accent-border)' : '1px solid var(--border)',
+              borderRadius: 'var(--radius-sm)',
+              cursor: 'pointer',
+              transition: 'background 0.15s, border-color 0.15s, color 0.15s',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          >
+            ?
+          </button>
+
+          {editTask && (
+            <button
+              type="button"
+              onClick={handleDelete}
+              aria-expanded={isConfirmingDelete}
+              className="hover-danger-border"
+              style={{
+                padding: '0 16px',
+                fontSize: 14,
+                color: 'var(--red)',
+                background: 'color-mix(in srgb, var(--red) 6%, transparent)',
+                border: '1px solid color-mix(in srgb, var(--red) 20%, transparent)',
+                borderRadius: 'var(--radius-sm)',
+                cursor: 'pointer',
+                height: 42,
+                fontWeight: 500,
+                transition: 'background 0.15s, border-color 0.15s',
+              }}
+            >
+              Delete
+            </button>
+          )}
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          {editTask ? (
+          <button
+            type="button"
+            className="btn-accent"
+            onClick={() => void submit()}
+            style={{
+              padding: '0 20px',
+              fontSize: 14,
+              fontWeight: 600,
+              borderRadius: 'var(--radius-sm)',
+              height: 42,
+            }}
+          >
+            Save
+          </button>
+        ) : (
+          <button
+            type="submit"
+            className="btn-accent"
+            disabled={isSaving}
+            aria-busy={isSaving}
+            style={{
+              padding: '0 20px',
+              fontSize: 14,
+              fontWeight: 600,
+              borderRadius: 'var(--radius-sm)',
+              height: 42,
+            }}
+          >
+            {isSaving ? 'Adding…' : 'Add'}
+          </button>
+        )}
+        </div>
+      </div>
+      {saveError && (
+        <div role="alert" style={{
+          padding: '10px 16px 12px',
+          background: 'var(--card)',
+          color: 'var(--red)',
+          fontSize: 14,
+          lineHeight: 1.45,
+        }}>
+          Couldn&apos;t save the task: {saveError}
+        </div>
+      )}
+      {editTask && isConfirmingDelete && (
+        <ConfirmCompleteDialog
+          task={editTask}
+          title="Are you sure?"
+          message="This task will be deleted."
+          confirmLabel="Delete"
+          confirmTone="danger"
+          onConfirm={handleConfirmDelete}
+          onCancel={() => setIsConfirmingDelete(false)}
+        />
+      )}
+    </form>
+  );
+}
